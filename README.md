@@ -4,7 +4,19 @@
 
 仅依赖 Python 标准库，Windows 专用。设计原理见 [设计文档.md](设计文档.md)。
 
-## 快速开始
+## 下载 exe（无需装 Python）
+
+到 [Releases](https://github.com/panxian-AI/typewriter-ime/releases/latest) 下载：
+
+| 文件 | 说明 |
+| --- | --- |
+| `typewriter-ime-v1.0.0-win.zip` | **推荐**，两个 exe + 使用说明，解压即用 |
+| `TypeWriterIME.exe` | 图形界面版，双击即用 |
+| `TypeWriterIME-cli.exe` | 命令行版 |
+
+> PyInstaller 单文件包无数字签名，杀毒软件可能误报，添加信任即可。
+
+## 快速开始（源码运行）
 
 ```bash
 # 图形界面（推荐）
