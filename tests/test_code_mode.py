@@ -22,7 +22,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typewriter_ime import (          # noqa: E402
-    VK_DELETE, VK_END, VK_HOME, VK_RETURN, VK_RIGHT, VK_TAB, build_steps,
+    VK_DELETE, VK_END, VK_HOME, VK_RETURN, VK_RIGHT, VK_TAB,
+    build_steps, resolve_indent,
 )
 
 INDENT = "    "
@@ -150,6 +151,75 @@ void blank() {
     }
 }"""
 
+# 真实案例：从网页复制后行首缩进全部丢失的代码（用户实际遇到的样子）
+FLAT = """#include <iostream>
+#include <iomanip>
+#include <string>
+using namespace std;
+// Student 类：用成员变量保存数据，用成员函数操作数据
+class Student {
+private:
+string name;   // 姓名
+string id;     // 学号
+double score;  // 成绩
+public:
+// 设置学生信息
+void setInfo(const string& n, const string& i, double s) {
+name = n;
+id = i;
+score = s;
+}
+// 输出学生信息（不修改成员，声明为 const 成员函数）
+void display() const {
+cout << "Name: " << name << endl;
+cout << "ID: " << id << endl;
+cout << "Score: " << fixed << setprecision(1) << score << endl;
+}
+};
+int main() {
+string name, id;
+double score;
+cin >> name >> id >> score;  // 一行输入：姓名 学号 成绩
+Student stu;                 // 创建一个学生对象
+stu.setInfo(name, id, score); // 通过对象调用成员函数设置属性
+stu.display();                // 通过对象调用成员函数输出信息
+return 0;
+}"""
+
+WANT = """#include <iostream>
+#include <iomanip>
+#include <string>
+using namespace std;
+// Student 类：用成员变量保存数据，用成员函数操作数据
+class Student {
+private:
+    string name;   // 姓名
+    string id;     // 学号
+    double score;  // 成绩
+public:
+    // 设置学生信息
+    void setInfo(const string& n, const string& i, double s) {
+        name = n;
+        id = i;
+        score = s;
+    }
+    // 输出学生信息（不修改成员，声明为 const 成员函数）
+    void display() const {
+        cout << "Name: " << name << endl;
+        cout << "ID: " << id << endl;
+        cout << "Score: " << fixed << setprecision(1) << score << endl;
+    }
+};
+int main() {
+    string name, id;
+    double score;
+    cin >> name >> id >> score;  // 一行输入：姓名 学号 成绩
+    Student stu;                 // 创建一个学生对象
+    stu.setInfo(name, id, score); // 通过对象调用成员函数设置属性
+    stu.display();                // 通过对象调用成员函数输出信息
+    return 0;
+}"""
+
 
 def show_diff(got: str, want: str) -> str:
     gl, wl = got.split("\n"), want.split("\n")
@@ -171,6 +241,18 @@ def case(name, src, brackets, indent, expect_equal, **model_kw):
         print("      " + show_diff(got, src).replace("\n", "\n      "))
     elif not expect_equal:
         print("      原始问题：" + show_diff(got, src).replace("\n", " / "))
+    return ok
+
+
+def case_indent(name, src, want, mode="auto", **model_kw):
+    """缩进丢失的源码 → 按大括号推导 → 逐字输入 → 与期望格式比对。"""
+    fixed = resolve_indent(src, mode)
+    model = EditorModel(**model_kw)
+    got = model.play(build_steps(fixed, "enter", "delete", True))
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  {name}  [推导后逐字输入 应完全一致]")
+    if not ok:
+        print("      " + show_diff(got, want).replace("\n", "\n      "))
     return ok
 
 
@@ -218,6 +300,11 @@ def main() -> int:
     ok &= case("单行 + 跳过补全", SINGLELINE, "skip", True, True)
     ok &= case("单行 + 删除自动补全", SINGLELINE, "delete", True, True)
     ok &= case("空块 / 空行 / 三层嵌套", EDGE, "delete", True, True)
+
+    print("\n缩进丢失 → 按大括号推导 → 逐字输入")
+    ok &= case_indent("真实案例：Student 类（网页复制丢了缩进）", FLAT, WANT)
+    ok &= case_indent("同一段代码，编辑器无自动缩进", FLAT, WANT, auto_indent=False)
+    ok &= case_indent("已排好版的源码，auto 不重排", WANT, WANT)
 
     print("\n真实注入")
     if "--live" in sys.argv:

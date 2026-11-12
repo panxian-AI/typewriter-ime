@@ -31,7 +31,8 @@ python typewriter_ime.py --clipboard
 1. 把要输入的内容粘贴进文本框（或点"读取剪贴板"）；
 2. 调整速度 / 启动延迟 / 换行方式（Enter、Shift+Enter、跳过换行）；
    - **括号补全**：默认「删除自动补全」，打完 `( [ { " '` 立刻删掉编辑器补的那个，源码里的 `) ] } "` 原样打 → 不会出现 `}}`；
-   - **缩进对齐**：默认开启，回车后 `Home`×2 + `Shift+End` 选中编辑器自动缩进的那串空格，再用源码缩进覆盖它 → 缩进不会翻倍；
+   - **缩进对齐**：默认开启，回车后 `Home`×2 + `Shift+End` 选中编辑器自动缩进的那串空格，再用缩进覆盖它 → 缩进不会翻倍；
+   - **缩进来源**（默认自动）：源码里有一半以上非空行带行首空白就信源码；否则按**大括号层级推导**——专门治"从网页/课件复制的代码复制时丢缩进"。`public:` / `private:` / `case:` 标签自动退一级，注释和字符串里的 `{ }` 不计数。「重排缩进」按钮可以先在文本框里看推导结果；
 3. 点"开始输入"或按 **F8**，在倒计时内切到目标窗口；
 4. 随时 **F8** 暂停/继续，**F9** 停止（全局热键，目标窗口有焦点也有效）。
 
@@ -45,6 +46,7 @@ python typewriter_ime.py --clipboard --speed 80 --delay 5 --newline shift
 python typewriter_ime.py --clipboard --no-human   # 匀速机械输入
 python typewriter_ime.py --clipboard --code       # 代码模式（删自动补全 + 缩进对齐）
 python typewriter_ime.py --file main.cpp --code --speed 45   # 打 C++ 源码
+python typewriter_ime.py --clipboard --indent-from braces    # 强制按大括号推导缩进
 python typewriter_ime.py --selftest               # 自检
 ```
 
@@ -58,6 +60,7 @@ python typewriter_ime.py --selftest               # 自检
 | `--code` | 关 | 代码模式 = `--brackets delete --indent` |
 | `--brackets` | off | `delete` 删掉编辑器补的闭合符（推荐）/ `skip` 用 → 跨过 / `off` 不处理 |
 | `--indent` | 关 | 缩进对齐：回车后选中自动缩进，再用源码缩进覆盖 |
+| `--indent-from` | auto | 缩进来源：`auto` 有缩进用源码、没有则按大括号推导 / `braces` 一律推导 / `source` 只用源码 |
 
 ## 特性
 

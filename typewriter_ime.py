@@ -17,6 +17,7 @@ import ctypes
 import ctypes.wintypes as wt
 import queue
 import random
+import re
 import sys
 import threading
 import time
@@ -58,6 +59,15 @@ BRACKET_LABELS = {
     "skip": "用 → 跳过补全",
     "off": "不处理（编辑器无补全）",
 }
+
+# 缩进来源：从网页/课件复制代码时，行首缩进常常在复制时丢掉（渲染出来的，不是真空白），
+# 这时只能根据大括号层级自己推导。
+INDENT_LABELS = {
+    "auto": "自动（有缩进用源码，没有则推导）",
+    "braces": "按大括号推导",
+    "source": "只用源码缩进",
+}
+INDENT_UNIT = "    "          # 推导时用的缩进宽度
 
 ULONG_PTR = ctypes.c_size_t
 
@@ -173,6 +183,101 @@ def estimate_seconds(text: str, base_ms: float, human: bool) -> float:
 
 
 # ───────────────────────── 代码模式：步骤编译 ─────────────────────────
+
+_ACCESS_LABEL = re.compile(r"^(public|private|protected)\s*:")
+_CASE_LABEL = re.compile(r"^(case\b|default\s*:)")
+
+
+def _scan_braces(s: str, in_block: bool) -> tuple:
+    """数一行里的 { }，跳过字符串、字符常量与注释。返回 (净增量, 行尾是否仍在块注释里)。"""
+    i, n, delta = 0, len(s), 0
+    while i < n:
+        if in_block:
+            j = s.find("*/", i)
+            if j < 0:
+                return delta, True
+            i = j + 2
+            in_block = False
+            continue
+        c = s[i]
+        if c == "/" and i + 1 < n and s[i + 1] == "/":
+            break                                   # 行注释，后面不计
+        if c == "/" and i + 1 < n and s[i + 1] == "*":
+            in_block = True
+            i += 2
+            continue
+        if c in "\"'":                              # 字符串 / 字符常量整段跳过
+            q, i = c, i + 1
+            while i < n:
+                if s[i] == "\\":
+                    i += 2
+                    continue
+                if s[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "{":
+            delta += 1
+        elif c == "}":
+            delta -= 1
+        i += 1
+    return delta, in_block
+
+
+def indent_ratio(text: str) -> float:
+    """有多少非空行带行首空白。用来判断源码缩进是不是在复制时丢了。"""
+    rows = [ln for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+    if not rows:
+        return 1.0
+    return sum(1 for ln in rows if ln[0] in " \t") / len(rows)
+
+
+def reindent_by_braces(text: str, unit: str = INDENT_UNIT) -> str:
+    """丢掉原有行首空白，按大括号层级重新推导缩进。
+
+    - 以 } 开头的行先退一级；
+    - public:/private:/protected: 与 case / default: 退一级，与上层的括号对齐；
+    - { } " ' 出现在注释或字符串里时不计数。
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out, depth, in_block = [], 0, False
+
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            out.append("")
+            continue
+
+        dedent = 0
+        if s.startswith("}"):
+            dedent = 1
+        elif _ACCESS_LABEL.match(s) or _CASE_LABEL.match(s):
+            dedent = 1
+
+        out.append(unit * max(0, depth - dedent) + s)
+        delta, in_block = _scan_braces(s, in_block)
+        depth = max(0, depth + delta)
+
+    return "\n".join(out)
+
+
+def resolve_indent(text: str, mode: str = "auto") -> str:
+    """按 mode 决定最终要输入的文本缩进。
+
+    auto —— 源码里超过一半的非空行带行首空白才信源码，否则按大括号推导。
+            这样"从网页复制、缩进全部丢掉"的情况会自动修好，
+            而手动排好版（含续行对齐）的源码不会被动到。
+    """
+    if mode == "source" or not text:
+        return text
+    if mode == "auto":
+        if indent_ratio(text) >= 0.5:
+            return text
+        if "{" not in text and "}" not in text:
+            return text
+    return reindent_by_braces(text)
+
 
 def build_steps(text: str, newline: str = "enter",
                 brackets: str = "off", indent: bool = False) -> list:
@@ -441,12 +546,31 @@ class TypeWriterApp:
                      font=(UI_FONT, 9)).pack(side="left")
 
         self.var_indent = tk.BooleanVar(value=True)
-        self._check(row4, "缩进对齐（回车后回行首再按源码缩进）",
+        self._check(row4, "缩进对齐（回车后回行首再按上面的缩进输入）",
                     self.var_indent).pack(side="left", padx=(14, 0))
+
+        # 第五行：缩进来源（从网页复制的代码常常没有行首缩进）
+        row5 = tk.Frame(cfg, bg=BG)
+        row5.pack(fill="x", pady=(10, 0))
+        tk.Label(row5, text="缩进来源", bg=BG, fg=SUB, font=(UI_FONT, 9),
+                 width=9, anchor="w").pack(side="left")
+        self.var_indent_from = tk.StringVar(value=INDENT_LABELS["auto"])
+        ttk.Combobox(row5, textvariable=self.var_indent_from, width=20,
+                     state="readonly", style="Dark.TCombobox",
+                     values=list(INDENT_LABELS.values()),
+                     font=(UI_FONT, 9)).pack(side="left")
+
+        self.btn_reindent = tk.Button(
+            row5, text="重排缩进", command=self.reindent_text,
+            bg=PANEL, fg=SUB, activebackground="#33373f", activeforeground=TEXT,
+            relief="flat", bd=0, font=(UI_FONT, 9), cursor="hand2", padx=10, pady=3,
+        )
+        self.btn_reindent.pack(side="left", padx=(12, 0))
 
         self.lbl_hint = tk.Label(
             outer,
-            text="代码模式：打完 { ( [ 会自动删掉编辑器补的那个闭合符，缩进按源码还原 → 不会出现 }} 、缩进翻倍",
+            text="代码模式：打完 { ( [ 自动删掉编辑器补的闭合符 → 不会出现 }}\n"
+                 "缩进缺失时按大括号层级推导（网页复制的代码常丢缩进）",
             bg=BG, fg=DIM, font=(UI_FONT, 8), anchor="w", justify="left",
         )
         self.lbl_hint.pack(fill="x", pady=(8, 0))
@@ -509,14 +633,39 @@ class TypeWriterApp:
     def _text(self) -> str:
         return self.text.get("1.0", "end-1c")
 
-    def _refresh_estimate(self):
+    def _indent_from_key(self) -> str:
+        label = self.var_indent_from.get()
+        return next((k for k, v in INDENT_LABELS.items() if v == label), "auto")
+
+    def _resolved_text(self) -> str:
+        """真正要输入的文本：按"缩进来源"决定是否重排缩进。"""
+        return resolve_indent(self._text(), self._indent_from_key())
+
+    def reindent_text(self):
+        """把文本框内容按大括号层级重排，让用户在输入前先看结果。"""
         text = self._text()
+        if not text.strip():
+            self._status("文本框是空的", RED)
+            return
+        fixed = reindent_by_braces(text)
+        if fixed == text:
+            self._status("这段文本的缩进已经是对的，无需重排", GREEN)
+            return
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", fixed)
+        self._refresh_estimate()
+        self._status("已按大括号层级重排缩进（撤销用 Ctrl+Z）", ACCENT)
+
+    def _refresh_estimate(self):
+        raw = self._text()
+        text = self._resolved_text()
         n = len(text)
         base = self.var_speed.get()
         secs = estimate_seconds(text, base, self.var_human.get())
         self.lbl_speed.configure(text=f"{base} ms / 字符")
         if self.state == "idle":
-            self.lbl_count.configure(text=f"{n} 字符 · 预计 {secs:.1f} 秒")
+            tag = " · 缩进已按大括号推导" if text != raw else ""
+            self.lbl_count.configure(text=f"{n} 字符 · 预计 {secs:.1f} 秒{tag}")
             self.pbar.configure(maximum=max(n, 1), value=0)
 
     def clear_text(self):
@@ -601,10 +750,17 @@ class TypeWriterApp:
     def start(self):
         if self.state != "idle":
             return
-        text = self._text()
-        if not text.strip():
+        raw = self._text()
+        if not raw.strip():
             self._status("文本框是空的，先粘贴点内容吧", RED)
             return
+
+        # 输入前先把缩进定下来，并同步回文本框 —— 让"看到的"就是"要敲的"
+        text = resolve_indent(raw, self._indent_from_key())
+        if text != raw:
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", text)
+            self._status("缩进已按大括号层级推导，即将开始", ACCENT)
 
         self.stop_event.clear()
         self.run_event.set()
@@ -762,6 +918,21 @@ def selftest() -> int:
               for t in ("f(x)", "a\n  b{c}", "int main() {\n\treturn 0;\n}")
               for b in ("off", "delete", "skip") for i in (False, True)))
 
+    # ── 缩进推导 ──
+    flat = "class A {\nprivate:\nint x;\npublic:\nvoid f() {\nif (x) {\n++x;\n}\n}\n};"
+    want = ("class A {\nprivate:\n    int x;\npublic:\n    void f() {\n"
+            "        if (x) {\n            ++x;\n        }\n    }\n};")
+    check("大括号推导：类 / 访问标签 / 嵌套块", reindent_by_braces(flat) == want,
+          repr(reindent_by_braces(flat)[:40]))
+    check("推导不误动源码：注释和字符串里的括号不计数",
+          reindent_by_braces('int f() {\n// }\ncout << "}";\nreturn 0;\n}') ==
+          'int f() {\n    // }\n    cout << "}";\n    return 0;\n}')
+    check("已排好版的不重排（auto 尊重源码）",
+          resolve_indent(want, "auto") == want)
+    check("缩进全丢时 auto 会推导",
+          resolve_indent(flat, "auto") == want)
+    check("mode=source 不做任何改动", resolve_indent(flat, "source") == flat)
+
     print("\n自检结果：" + ("全部通过" if ok else "存在失败项"))
     return 0 if ok else 1
 
@@ -860,7 +1031,11 @@ def cli(argv: list) -> int:
                    help="括号补全处理：delete 删掉编辑器补的那个（推荐）/ "
                         "skip 用 → 跨过 / off 不处理")
     p.add_argument("--indent", action="store_true",
-                   help="缩进对齐：回车后先回行首，再按源码缩进输入")
+                   help="缩进对齐：回车后先回行首，再按缩进输入")
+    p.add_argument("--indent-from", choices=["auto", "source", "braces"],
+                   default="auto",
+                   help="缩进来源：auto 有缩进用源码、没有则按大括号推导（默认）/ "
+                        "braces 一律按大括号推导 / source 只用源码")
     p.add_argument("--gui", action="store_true", help="强制打开图形界面")
     args = p.parse_args(argv)
 
@@ -880,6 +1055,12 @@ def cli(argv: list) -> int:
         if not text:
             print("剪贴板里没有文本。", file=sys.stderr)
             return 2
+
+    fixed = resolve_indent(text, args.indent_from)
+    if fixed != text:
+        print(f"缩进缺失（仅 {indent_ratio(text):.0%} 的非空行带行首空白），"
+              f"已按大括号层级推导 —— 不想改就加 --indent-from source")
+    text = fixed
 
     return run_headless(text, args.speed, not args.no_human,
                         args.newline, args.delay, brackets, indent)
