@@ -265,6 +265,62 @@ def reindent_by_braces(text: str, unit: str = INDENT_UNIT) -> str:
     return "\n".join(out)
 
 
+def _compact_line(line: str) -> str:
+    """压缩一行里 // 前面的对齐空格（行首缩进保留，字符串里的空格不动）。"""
+    res, i, n, quote = [], 0, len(line), ""
+    indent_only = True                       # res 里目前只有行首空白
+
+    while i < n:
+        c = line[i]
+        if quote:
+            res.append(c)
+            if c == "\\" and i + 1 < n:
+                res.append(line[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+
+        if c in "\"'":
+            quote = c
+            res.append(c)
+            indent_only = False
+            i += 1
+            continue
+
+        if c in " \t":
+            j = i
+            while j < n and line[j] in " \t":
+                j += 1
+            before_comment = j + 1 < n and line[j] == "/" and line[j + 1] == "/"
+            if before_comment and not indent_only:
+                res.append(" ")              # 对齐空格压成一个
+            else:
+                res.append(line[i:j])
+            i = j
+            continue
+
+        res.append(c)
+        indent_only = False
+        i += 1
+
+    return "".join(res)
+
+
+def compact_comment_gaps(text: str) -> str:
+    """把 `code;      // 注释` 里的对齐空格压成单个空格。
+
+    在线代码编辑器（如超星）遇到这种长空格串 + // 会出问题，
+    表现为那段内容被打完之后整块消失；去掉对齐空格后恢复正常。
+    """
+    if not text:
+        return text
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(_compact_line(ln) for ln in lines)
+
+
 def resolve_indent(text: str, mode: str = "auto") -> str:
     """按 mode 决定最终要输入的文本缩进。
 
@@ -280,6 +336,15 @@ def resolve_indent(text: str, mode: str = "auto") -> str:
         if "{" not in text and "}" not in text:
             return text
     return reindent_by_braces(text)
+
+
+def prepare_text(text: str, indent_from: str = "auto",
+                 tidy_comments: bool = True) -> str:
+    """最终要输入的文本：先定缩进，再压缩注释前的对齐空格。"""
+    out = resolve_indent(text, indent_from)
+    if tidy_comments:
+        out = compact_comment_gaps(out)
+    return out
 
 
 def build_steps(text: str, newline: str = "enter",
@@ -570,8 +635,16 @@ class TypeWriterApp:
         )
         self.btn_reindent.pack(side="left", padx=(12, 0))
 
+        # 第六行：输入后的处理选项
+        row6 = tk.Frame(cfg, bg=BG)
+        row6.pack(fill="x", pady=(8, 0))
+        tk.Label(row6, text="输入选项", bg=BG, fg=SUB, font=(UI_FONT, 9),
+                 width=9, anchor="w").pack(side="left")
+        self.var_tidy = tk.BooleanVar(value=True)
+        self._check(row6, "压缩注释前的对齐空格（实测能避免整块丢内容）",
+                    self.var_tidy).pack(side="left")
         self.var_verify = tk.BooleanVar(value=True)
-        self._check(row5, "打完自检", self.var_verify).pack(side="left", padx=(14, 0))
+        self._check(row6, "打完自检", self.var_verify).pack(side="left", padx=(14, 0))
 
         self.lbl_hint = tk.Label(
             outer,
@@ -644,8 +717,9 @@ class TypeWriterApp:
         return next((k for k, v in INDENT_LABELS.items() if v == label), "auto")
 
     def _resolved_text(self) -> str:
-        """真正要输入的文本：按"缩进来源"决定是否重排缩进。"""
-        return resolve_indent(self._text(), self._indent_from_key())
+        """真正要输入的文本：定缩进 + 压缩注释前的对齐空格。"""
+        return prepare_text(self._text(), self._indent_from_key(),
+                            self.var_tidy.get())
 
     def reindent_text(self):
         """把文本框内容按大括号层级重排，让用户在输入前先看结果。"""
@@ -670,7 +744,7 @@ class TypeWriterApp:
         secs = estimate_seconds(text, base, self.var_human.get())
         self.lbl_speed.configure(text=f"{base} ms / 字符")
         if self.state == "idle":
-            tag = " · 缩进已按大括号推导" if text != raw else ""
+            tag = " · 已自动整理缩进/注释空格" if text != raw else ""
             self.lbl_count.configure(text=f"{n} 字符 · 预计 {secs:.1f} 秒{tag}")
             self.pbar.configure(maximum=max(n, 1), value=0)
 
@@ -762,11 +836,11 @@ class TypeWriterApp:
             return
 
         # 输入前先把缩进定下来，并同步回文本框 —— 让"看到的"就是"要敲的"
-        text = resolve_indent(raw, self._indent_from_key())
+        text = prepare_text(raw, self._indent_from_key(), self.var_tidy.get())
         if text != raw:
             self.text.delete("1.0", "end")
             self.text.insert("1.0", text)
-            self._status("缩进已按大括号层级推导，即将开始", ACCENT)
+            self._status("已自动整理缩进/注释空格（见文本框），即将开始", ACCENT)
 
         self.stop_event.clear()
         self.run_event.set()
@@ -977,6 +1051,16 @@ def selftest() -> int:
           diff_typed("if (x) {\n    y();\n}", "if (x) {\ny();\n}")[0] == "indent")
     check("自检：读回为空 → empty", diff_typed(src3, "")[0] == "empty")
 
+    # ── 注释前对齐空格压缩 ──
+    check("压缩注释前空格", compact_comment_gaps("int x = 1;        // c") == "int x = 1; // c")
+    check("行首缩进保留", compact_comment_gaps("    // 只有注释") == "    // 只有注释")
+    check("字符串里的空格不动",
+          compact_comment_gaps('cout << "a  b";      // c') == 'cout << "a  b"; // c')
+    check("Tab 对齐也压缩", compact_comment_gaps("x;\t\t// c") == "x; // c")
+    check("prepare_text 默认会压缩注释空格",
+          prepare_text(flat, "braces", True) ==
+          compact_comment_gaps(reindent_by_braces(flat)))
+
     print("\n自检结果：" + ("全部通过" if ok else "存在失败项"))
     return 0 if ok else 1
 
@@ -1152,6 +1236,9 @@ def cli(argv: list) -> int:
                    default="auto",
                    help="缩进来源：auto 有缩进用源码、没有则按大括号推导（默认）/ "
                         "braces 一律按大括号推导 / source 只用源码")
+    p.add_argument("--no-tidy-comments", action="store_true",
+                   help="保留 // 前面的对齐空格（默认会压成一个，"
+                        "长空格串会让部分在线编辑器整块丢内容）")
     p.add_argument("--verify", action="store_true",
                    help="打完自检：Ctrl+A / Ctrl+C 读回目标内容，与原文逐行比对"
                         "（会占用一次剪贴板）")
@@ -1175,11 +1262,15 @@ def cli(argv: list) -> int:
             print("剪贴板里没有文本。", file=sys.stderr)
             return 2
 
-    fixed = resolve_indent(text, args.indent_from)
-    if fixed != text:
+    if args.indent_from != "source" and indent_ratio(text) < 0.5:
         print(f"缩进缺失（仅 {indent_ratio(text):.0%} 的非空行带行首空白），"
               f"已按大括号层级推导 —— 不想改就加 --indent-from source")
-    text = fixed
+
+    before = resolve_indent(text, args.indent_from)
+    text = prepare_text(text, args.indent_from, not args.no_tidy_comments)
+    if args.no_tidy_comments is False and text != before:
+        print("注释前的对齐空格已压缩（长空格串会让部分在线编辑器整块丢内容）"
+              " —— 想保留原样就加 --no-tidy-comments")
 
     return run_headless(text, args.speed, not args.no_human,
                         args.newline, args.delay, brackets, indent, args.verify)
