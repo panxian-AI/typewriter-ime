@@ -30,7 +30,7 @@ except ImportError:          # 无 tkinter 时仍可用命令行模式
     tk = ttk = None
 
 APP_NAME = "逐字输入器"
-VERSION = "1.0"
+VERSION = "1.0.3"
 
 # ─────────────────────────── Win32 底层 ───────────────────────────
 
