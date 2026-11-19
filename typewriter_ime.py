@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import difflib
 import queue
 import random
 import re
@@ -42,10 +43,13 @@ KEYEVENTF_UNICODE = 0x0004
 VK_RETURN = 0x0D
 VK_TAB = 0x09
 VK_SHIFT = 0x10
+VK_CONTROL = 0x11
 VK_END = 0x23
 VK_HOME = 0x24
 VK_DELETE = 0x2E
 VK_RIGHT = 0x27
+VK_A = 0x41
+VK_C = 0x43
 VK_F8 = 0x77
 VK_F9 = 0x78
 GA_ROOT = 2
@@ -138,14 +142,13 @@ def send_char(ch: str) -> bool:
     return _emit(batch)
 
 
-def send_vk(vk: int, with_shift: bool = False) -> bool:
-    batch = []
-    if with_shift:
-        batch.append(_kb(vk=VK_SHIFT))
+def send_vk(vk: int, with_shift: bool = False, with_ctrl: bool = False) -> bool:
+    mods = ([VK_CONTROL] if with_ctrl else []) + ([VK_SHIFT] if with_shift else [])
+    batch = [_kb(vk=m) for m in mods]
     batch.append(_kb(vk=vk))
     batch.append(_kb(vk=vk, flags=KEYEVENTF_KEYUP))
-    if with_shift:
-        batch.append(_kb(vk=VK_SHIFT, flags=KEYEVENTF_KEYUP))
+    for m in reversed(mods):
+        batch.append(_kb(vk=m, flags=KEYEVENTF_KEYUP))
     return _emit(batch)
 
 
@@ -567,6 +570,9 @@ class TypeWriterApp:
         )
         self.btn_reindent.pack(side="left", padx=(12, 0))
 
+        self.var_verify = tk.BooleanVar(value=True)
+        self._check(row5, "打完自检", self.var_verify).pack(side="left", padx=(14, 0))
+
         self.lbl_hint = tk.Label(
             outer,
             text="代码模式：打完 { ( [ 自动删掉编辑器补的闭合符 → 不会出现 }}\n"
@@ -778,6 +784,7 @@ class TypeWriterApp:
             "newline": self.var_newline.get(),
             "brackets": bracket_key,
             "indent": self.var_indent.get(),
+            "verify": self.var_verify.get(),
             "countdown": delay,
         }
         self.worker = threading.Thread(target=self._run, args=(opts,), daemon=True)
@@ -807,6 +814,22 @@ class TypeWriterApp:
         self._set_state("idle")
         self._status(msg, color)
         self.pbar.configure(value=0)
+
+    def _show_verify_detail(self, msg: str, detail: str):
+        """自检不通过时弹窗列出逐行差异。必须在主线程弹，所以走 after。"""
+        def popup():
+            try:
+                from tkinter import messagebox
+                body = detail or "（没有可显示的差异）"
+                body += ("\n\n如果这段差异看起来是完整的，"
+                         "说明内容是打完之后被编辑器/平台改掉的。")
+                messagebox.showwarning("打完自检", f"{msg}\n\n{body}", parent=self.root)
+            except Exception:
+                pass
+        try:
+            self.root.after(0, popup)
+        except Exception:
+            pass
 
     # ---------------- 后台工作线程 ----------------
 
@@ -864,6 +887,16 @@ class TypeWriterApp:
 
         if status == "ok":
             self.progress = (total, total)
+            if opts.get("verify"):
+                self._status("输入完成，正在自检（Ctrl+A / Ctrl+C 读回内容）…", ACCENT)
+                vstate, vmsg, vdetail = verify_typed_text(
+                    text, user32.GetForegroundWindow())
+                if vstate == "ok":
+                    self._finish(f"✓ 完成 {total} 字符 · {vmsg}", GREEN)
+                else:
+                    self._finish(f"⚠ {vmsg}", RED)
+                    self._show_verify_detail(vmsg, vdetail)
+                return
             self._finish(f"✓ 完成，共输入 {total} 个字符", GREEN)
         elif status == "blocked":
             self._finish("输入被系统拒绝，可能目标窗口不支持文本注入", RED)
@@ -933,6 +966,17 @@ def selftest() -> int:
           resolve_indent(flat, "auto") == want)
     check("mode=source 不做任何改动", resolve_indent(flat, "source") == flat)
 
+    # ── 打完自检的比对逻辑 ──
+    src3 = "int a = 1;\nint b = 2;\nreturn 0;"
+    check("自检：完全一致 → ok", diff_typed(src3, src3)[0] == "ok")
+    check("自检：行尾空格/末尾空行不算差异",
+          diff_typed(src3, "int a = 1;  \nint b = 2;\nreturn 0;\n\n")[0] == "ok")
+    check("自检：丢行 → 报行数不符",
+          diff_typed(src3, "int a = 1;\nreturn 0;")[0] == "mismatch")
+    check("自检：内容在但缩进变了 → indent",
+          diff_typed("if (x) {\n    y();\n}", "if (x) {\ny();\n}")[0] == "indent")
+    check("自检：读回为空 → empty", diff_typed(src3, "")[0] == "empty")
+
     print("\n自检结果：" + ("全部通过" if ok else "存在失败项"))
     return 0 if ok else 1
 
@@ -962,9 +1006,73 @@ def read_clipboard() -> str:
         user32.CloseClipboard()
 
 
+def _norm_for_compare(text: str) -> list:
+    """按行归一：去掉行尾空白与首尾空行（编辑器常改这两处，不算差异）。"""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    lines = [ln.rstrip() for ln in lines]
+    while lines and not lines[-1]:
+        lines.pop()
+    while lines and not lines[0]:
+        lines.pop(0)
+    return lines
+
+
+def diff_typed(expected: str, actual: str) -> tuple:
+    """比对期望文本与实际内容。返回 (状态, 一句话结论, 明细)。"""
+    e = _norm_for_compare(expected)
+    a = _norm_for_compare(actual)
+
+    if not a:
+        return ("empty", "自检未能读取内容（Ctrl+A / Ctrl+C 没拿到东西）", "")
+    if e == a:
+        return ("ok", f"自检通过：{len(e)} 行逐字一致", "")
+
+    detail = "\n".join(difflib.unified_diff(
+        e, a, fromfile="期望", tofile="实际", lineterm="", n=1))
+    detail_lines = detail.split("\n")
+    if len(detail_lines) > 24:
+        detail = "\n".join(detail_lines[:24]) + f"\n…（共 {len(detail_lines)} 行差异）"
+
+    if [x.lstrip() for x in e] == [x.lstrip() for x in a]:
+        return ("indent", "自检：内容都在，但缩进与原文不一致", detail)
+    if len(e) != len(a):
+        return ("mismatch", f"自检：行数不对 —— 期望 {len(e)} 行，实际 {len(a)} 行", detail)
+    return ("mismatch", "自检：有行内容与原文不一致", detail)
+
+
+def verify_typed_text(expected: str, expected_hwnd: int = 0) -> tuple:
+    """打完自检：Ctrl+A / Ctrl+C 读回目标里真正的内容，与原文比对。
+
+    expected_hwnd —— 输入结束时前台窗口的句柄。焦点已经跑掉就直接跳过，
+    否则会读到别的窗口的内容，报出假差异。
+    会占用一次剪贴板（原内容不保证能恢复）；读完发一个 → 取消全选。
+    """
+    if expected_hwnd and user32.GetForegroundWindow() != expected_hwnd:
+        return ("skipped", "自检跳过：焦点已不在目标窗口", "")
+
+    before = read_clipboard()
+    time.sleep(0.05)
+
+    if not send_vk(VK_A, with_ctrl=True):
+        return ("unreadable", "自检：无法发送 Ctrl+A", "")
+    time.sleep(0.12)
+    if not send_vk(VK_C, with_ctrl=True):
+        return ("unreadable", "自检：无法发送 Ctrl+C", "")
+    time.sleep(0.40)
+
+    got = read_clipboard()
+    send_vk(VK_RIGHT)                       # 取消全选，光标停在末尾
+    time.sleep(0.05)
+
+    if got and got == before:
+        return ("unreadable", "自检：剪贴板内容没变，Ctrl+C 可能没生效", "")
+    return diff_typed(expected, got)
+
+
 def run_headless(text: str, base: float, human: bool,
                  newline: str, countdown: float,
-                 brackets: str = "off", indent: bool = False) -> int:
+                 brackets: str = "off", indent: bool = False,
+                 verify: bool = False) -> int:
     if not text.strip():
         print("没有要输入的文本。", file=sys.stderr)
         return 2
@@ -1003,6 +1111,14 @@ def run_headless(text: str, base: float, human: bool,
         return 130
 
     print(f"\n✓ 完成，共输入 {total} 个字符，用时 {time.perf_counter() - t_start:.0f} 秒")
+
+    if verify:
+        vstate, vmsg, vdetail = verify_typed_text(
+            text, user32.GetForegroundWindow())
+        print("\n" + vmsg)
+        if vdetail:
+            print(vdetail)
+        return 0 if vstate == "ok" else 3
     return 0
 
 
@@ -1036,6 +1152,9 @@ def cli(argv: list) -> int:
                    default="auto",
                    help="缩进来源：auto 有缩进用源码、没有则按大括号推导（默认）/ "
                         "braces 一律按大括号推导 / source 只用源码")
+    p.add_argument("--verify", action="store_true",
+                   help="打完自检：Ctrl+A / Ctrl+C 读回目标内容，与原文逐行比对"
+                        "（会占用一次剪贴板）")
     p.add_argument("--gui", action="store_true", help="强制打开图形界面")
     args = p.parse_args(argv)
 
@@ -1063,7 +1182,7 @@ def cli(argv: list) -> int:
     text = fixed
 
     return run_headless(text, args.speed, not args.no_human,
-                        args.newline, args.delay, brackets, indent)
+                        args.newline, args.delay, brackets, indent, args.verify)
 
 
 if __name__ == "__main__":
