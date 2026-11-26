@@ -105,6 +105,9 @@ class EditorModel:
     def key_shift_end(self):
         self.sel = (self.cur, self.line_end())
 
+    def key_shift_home(self):
+        self.sel = (self.line_start(), self.cur)
+
     def key_delete(self):
         if self.cur < len(self.buf):
             del self.buf[self.cur]
@@ -118,7 +121,10 @@ class EditorModel:
             elif arg[0] == VK_END:
                 self.key_shift_end()
             elif arg[0] == VK_HOME:
-                self.key_home()
+                if arg[1]:
+                    self.key_shift_home()
+                else:
+                    self.key_home()
             elif arg[0] == VK_DELETE:
                 self.key_delete()
             elif arg[0] == VK_TAB:
@@ -221,6 +227,16 @@ int main() {
 }"""
 
 
+class ToggleHomeModel(EditorModel):
+    """Home 在「行首」与「首个非空白」之间来回切换的编辑器（复现缩进累积 bug）。"""
+
+    def key_home(self):
+        ls = self.line_start()
+        full = "".join(self.buf[ls:self.line_end()])
+        first = ls + len(full) - len(full.lstrip(" \t"))
+        self.cur = first if self.cur == ls else ls
+
+
 def show_diff(got: str, want: str) -> str:
     gl, wl = got.split("\n"), want.split("\n")
     for i in range(max(len(gl), len(wl))):
@@ -232,7 +248,8 @@ def show_diff(got: str, want: str) -> str:
 
 
 def case(name, src, brackets, indent, expect_equal, **model_kw):
-    model = EditorModel(**model_kw)
+    model = (ToggleHomeModel(**model_kw) if os.environ.get("SIM_TOGGLE_HOME")
+         else EditorModel(**model_kw))
     got = model.play(build_steps(src, "enter", brackets, indent))
     ok = (got == src) if expect_equal else (got != src)
     label = "应完全一致" if expect_equal else "应暴露问题（对照）"
@@ -247,7 +264,8 @@ def case(name, src, brackets, indent, expect_equal, **model_kw):
 def case_indent(name, src, want, mode="auto", **model_kw):
     """缩进丢失的源码 → 按大括号推导 → 逐字输入 → 与期望格式比对。"""
     fixed = resolve_indent(src, mode)
-    model = EditorModel(**model_kw)
+    model = (ToggleHomeModel(**model_kw) if os.environ.get("SIM_TOGGLE_HOME")
+         else EditorModel(**model_kw))
     got = model.play(build_steps(fixed, "enter", "delete", True))
     ok = got == want
     print(f"  {'PASS' if ok else 'FAIL'}  {name}  [推导后逐字输入 应完全一致]")

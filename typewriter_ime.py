@@ -30,7 +30,7 @@ except ImportError:          # 无 tkinter 时仍可用命令行模式
     tk = ttk = None
 
 APP_NAME = "逐字输入器"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # ─────────────────────────── Win32 底层 ───────────────────────────
 
@@ -373,9 +373,10 @@ def build_steps(text: str, newline: str = "enter",
             elif newline == "shift":
                 steps.append(("vk", (VK_RETURN, True), 1))
             if indent:
-                steps.append(("vk", (VK_HOME, False), 0))
-                steps.append(("vk", (VK_HOME, False), 0))
-                steps.append(("vk", (VK_END, True), 0))
+                # Shift+Home 从光标往行首选中自动缩进——不依赖 Home 的
+                # 智能跳转/切换行为（部分网页编辑器按两次 Home 会跳回来，
+                # 导致 Shift+End 选了个空、源码缩进插进去，缩进一路变多）
+                steps.append(("vk", (VK_HOME, True), 0))
 
         for ch in line:
             if ch == "\t":
@@ -1013,10 +1014,10 @@ def selftest() -> int:
           kinds(build_steps("f(x)", "enter", "skip")) ==
           ["charf", "char(", "charx", f"vk{VK_RIGHT}"],
           str(kinds(build_steps("f(x)", "enter", "skip"))))
-    check("indent 模式：回车后两次 Home + Shift+End 选中自动缩进",
+    check("indent 模式：回车后 Shift+Home 选中自动缩进",
           kinds(build_steps("a\n  b", "enter", "off", True)) ==
-          ["chara", f"vk{VK_RETURN}", f"vk{VK_HOME}", f"vk{VK_HOME}",
-           f"vk{VK_END}", "char ", "char ", "charb"],
+          ["chara", f"vk{VK_RETURN}", f"vk{VK_HOME}",
+           "char ", "char ", "charb"],
           str(kinds(build_steps("a\n  b", "enter", "off", True))))
     check("默认模式不插入任何控制键",
           kinds(build_steps("f(x)")) == ["charf", "char(", "charx", f"char)"])
